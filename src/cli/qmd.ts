@@ -3173,13 +3173,107 @@ if (isMain) {
       break;
     }
 
+    case "pipe-query": {
+      // Persistent JSONL query server: reads requests from stdin, writes JSON to stdout.
+      // Keeps store + LLM models loaded across queries to eliminate per-call Bun startup.
+      // Protocol: one JSON object per line in, one JSON array/object per line out.
+      const store = getStore();
+      const rl = createInterface({ input: process.stdin });
+
+      // Signal readiness so the client knows we're alive
+      process.stdout.write('{"ready":true}\n');
+
+      for await (const line of rl) {
+        try {
+          const req = JSON.parse(line);
+          let output: any[];
+
+          if (req.command === "query") {
+            const collectionNames: string[] | undefined = req.collections;
+            const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
+            const raw = await hybridQuery(store, req.query, {
+              collection: singleCollection,
+              limit: req.limit ?? 10,
+              skipRerank: req.skipRerank ?? false,
+              explain: req.explain ?? false,
+              intent: req.intent,
+              candidateLimit: req.candidateLimit,
+              minScore: req.minScore,
+            });
+            // Post-filter for multi-collection
+            let results = raw;
+            if (collectionNames && collectionNames.length > 1) {
+              const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
+              results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
+            }
+            output = results.map(r => ({
+              docid: `#${r.docid}`,
+              score: Math.round(r.score * 100) / 100,
+              file: r.file,
+              title: r.title,
+              ...(r.context && { context: r.context }),
+              snippet: extractSnippet(r.bestChunk || r.body || "", req.query, 300, r.bestChunkPos).snippet,
+              ...(r.explain ? { explain: r.explain } : {}),
+            }));
+          } else if (req.command === "search") {
+            const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
+            output = raw.map(r => ({
+              docid: `#${r.docid}`,
+              score: Math.round(r.score * 100) / 100,
+              file: `qmd://${r.displayPath}`,
+              title: r.title,
+              ...(r.context && { context: r.context }),
+              snippet: extractSnippet(r.body || "", req.query, 300).snippet,
+            }));
+          } else if (req.command === "structured-search") {
+            const collectionNames: string[] | undefined = req.collections;
+            const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
+            const raw = await structuredSearch(store, req.searches, {
+              collections: singleCollection ? [singleCollection] : undefined,
+              limit: req.limit ?? 10,
+              skipRerank: req.skipRerank ?? false,
+              explain: req.explain ?? false,
+              intent: req.intent,
+              candidateLimit: req.candidateLimit,
+              minScore: req.minScore,
+            });
+            // Post-filter for multi-collection
+            let results = raw;
+            if (collectionNames && collectionNames.length > 1) {
+              const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
+              results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
+            }
+            output = results.map(r => ({
+              docid: `#${r.docid}`,
+              score: Math.round(r.score * 100) / 100,
+              file: r.file,
+              title: r.title,
+              ...(r.context && { context: r.context }),
+              snippet: extractSnippet(r.bestChunk || r.body || "", req.query || "", 300, r.bestChunkPos).snippet,
+              ...(r.explain ? { explain: r.explain } : {}),
+            }));
+          } else {
+            process.stdout.write(JSON.stringify({ error: `Unknown command: ${req.command}` }) + "\n");
+            continue;
+          }
+
+          process.stdout.write(JSON.stringify(output) + "\n");
+        } catch (err: any) {
+          process.stdout.write(JSON.stringify({ error: err?.message || String(err) }) + "\n");
+        }
+      }
+
+      closeDb();
+      break;
+    }
+
     default:
       console.error(`Unknown command: ${cli.command}`);
       console.error("Run 'qmd --help' for usage.");
       process.exit(1);
   }
 
-  if (cli.command !== "mcp") {
+  if (cli.command !== "mcp" && cli.command !== "pipe-query") {
     await disposeDefaultLlamaCpp();
     process.exit(0);
   }

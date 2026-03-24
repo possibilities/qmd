@@ -26,6 +26,10 @@ import { existsSync, mkdirSync, statSync, unlinkSync, readdirSync, readFileSync,
  * Detect if a model URI uses the Qwen3-Embedding format.
  * Qwen3-Embedding uses a different prompting style than nomic/embeddinggemma.
  */
+const _profile = process.env.QMD_PROFILE === "1";
+const timeStart = _profile ? (label: string) => console.time(label) : () => {};
+const timeEnd = _profile ? (label: string) => console.timeEnd(label) : () => {};
+
 export function isQwen3EmbeddingModel(modelUri: string): boolean {
   return /qwen.*embed/i.test(modelUri) || /embed.*qwen/i.test(modelUri);
 }
@@ -891,9 +895,12 @@ export class LlamaCpp implements LLM {
     if (texts.length === 0) return [];
 
     try {
+      timeStart("qmd:embed-model-load");
       const contexts = await this.ensureEmbedContexts();
+      timeEnd("qmd:embed-model-load");
       const n = contexts.length;
 
+      timeStart("qmd:embed-inference");
       if (n === 1) {
         // Single context: sequential (no point splitting)
         const context = contexts[0]!;
@@ -912,6 +919,7 @@ export class LlamaCpp implements LLM {
             embeddings.push(null);
           }
         }
+        timeEnd("qmd:embed-inference");
         return embeddings;
       }
 
@@ -943,6 +951,7 @@ export class LlamaCpp implements LLM {
         })
       );
 
+      timeEnd("qmd:embed-inference");
       return chunkResults.flat();
     } catch (error) {
       console.error("Batch embedding error:", error);
@@ -1015,8 +1024,10 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
+    timeStart("qmd:expand-model-load");
     const llama = await this.ensureLlama();
     await this.ensureGenerateModel();
+    timeEnd("qmd:expand-model-load");
 
     const includeLexical = options.includeLexical ?? true;
     const context = options.context;
@@ -1046,6 +1057,7 @@ export class LlamaCpp implements LLM {
       // Qwen3 recommended settings for non-thinking mode:
       // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
+      timeStart("qmd:expand-inference");
       const result = await session.prompt(prompt, {
         grammar,
         maxTokens: 600,
@@ -1057,6 +1069,7 @@ export class LlamaCpp implements LLM {
           presencePenalty: 0.5,
         },
       });
+      timeEnd("qmd:expand-inference");
 
       const lines = result.trim().split("\n");
       const queryLower = query.toLowerCase();
@@ -1112,8 +1125,10 @@ export class LlamaCpp implements LLM {
     // Ping activity at start to keep models alive during this operation
     this.touchActivity();
 
+    timeStart("qmd:rerank-model-load");
     const contexts = await this.ensureRerankContexts();
     const model = await this.ensureRerankModel();
+    timeEnd("qmd:rerank-model-load");
 
     // Truncate documents that would exceed the rerank context size.
     // Budget = contextSize - template overhead - query tokens
@@ -1169,9 +1184,11 @@ export class LlamaCpp implements LLM {
       texts.slice(i * chunkSize, (i + 1) * chunkSize)
     ).filter(chunk => chunk.length > 0);
 
+    timeStart("qmd:rerank-inference");
     const allScores = await Promise.all(
       chunks.map((chunk, i) => activeContexts[i]!.rankAll(query, chunk))
     );
+    timeEnd("qmd:rerank-inference");
 
     // Reassemble scores in original order and sort
     const flatScores = allScores.flat();

@@ -3243,13 +3243,16 @@ if (isMain) {
               const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
               results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
             }
+            const displayQuery = req.searches?.find((s: any) => s.type === 'lex')?.query
+              || req.searches?.find((s: any) => s.type === 'vec')?.query
+              || req.searches?.[0]?.query || "";
             output = results.map(r => ({
               docid: `#${r.docid}`,
               score: Math.round(r.score * 100) / 100,
               file: r.file,
               title: r.title,
               ...(r.context && { context: r.context }),
-              snippet: extractSnippet(r.bestChunk || r.body || "", req.query || "", 300, r.bestChunkPos).snippet,
+              snippet: extractSnippet(r.bestChunk || r.body || "", displayQuery, 300, r.bestChunkPos).snippet,
               ...(r.explain ? { explain: r.explain } : {}),
             }));
           } else {

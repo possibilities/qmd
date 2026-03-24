@@ -651,6 +651,13 @@ function initializeDatabase(db: Database): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
 
+  // Performance tuning for large vector databases (~4GB, 46K docs).
+  // cache_size: negative = KB. -262144 = 256MB (default -2000 = 2MB).
+  db.exec("PRAGMA cache_size = -262144");
+  // mmap_size: memory-map up to 2GB. Lets OS page cache serve reads
+  // without SQLite buffer pool copies. Safe with WAL mode.
+  db.exec("PRAGMA mmap_size = 2147483648");
+
   // Drop legacy tables that are now managed in YAML
   db.exec(`DROP TABLE IF EXISTS path_contexts`);
   db.exec(`DROP TABLE IF EXISTS collections`);

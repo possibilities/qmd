@@ -1262,6 +1262,14 @@ export class LlamaCpp implements LLM {
     };
   }
 
+  getModelStatus(): { role: string; name: string; loaded: boolean }[] {
+    return [
+      { role: "embed", name: this.embedModelUri.split("/").pop()?.replace(/\.gguf$/, "") ?? "unknown", loaded: this.embedModel !== null },
+      { role: "rerank", name: this.rerankModelUri.split("/").pop()?.replace(/\.gguf$/, "") ?? "unknown", loaded: this.rerankModel !== null },
+      { role: "generate", name: this.generateModelUri.split("/").pop()?.replace(/\.gguf$/, "") ?? "unknown", loaded: this.generateModel !== null },
+    ];
+  }
+
   async dispose(): Promise<void> {
     // Prevent double-dispose
     if (this.disposed) {

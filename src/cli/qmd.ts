@@ -3214,6 +3214,7 @@ if (isMain) {
               ...(r.context && { context: r.context }),
               snippet: extractSnippet(r.bestChunk || r.body || "", req.query, 300, r.bestChunkPos).snippet,
               ...(r.explain ? { explain: r.explain } : {}),
+              ...(req.includeContent && r.body ? { body: r.body } : {}),
             }));
           } else if (req.command === "search") {
             const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
@@ -3224,6 +3225,7 @@ if (isMain) {
               title: r.title,
               ...(r.context && { context: r.context }),
               snippet: extractSnippet(r.body || "", req.query, 300).snippet,
+              ...(req.includeContent && r.body ? { body: r.body } : {}),
             }));
           } else if (req.command === "structured-search") {
             const collectionNames: string[] | undefined = req.collections;
@@ -3251,6 +3253,7 @@ if (isMain) {
               ...(r.context && { context: r.context }),
               snippet: extractSnippet(r.bestChunk || r.body || "", req.query || "", 300, r.bestChunkPos).snippet,
               ...(r.explain ? { explain: r.explain } : {}),
+              ...(req.includeContent && r.body ? { body: r.body } : {}),
             }));
           } else {
             process.stdout.write(JSON.stringify({ error: `Unknown command: ${req.command}` }) + "\n");

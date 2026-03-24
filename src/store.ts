@@ -2829,12 +2829,40 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // "optimize" this by combining into a single query with JOINs - it will break.
   // See: https://github.com/tobi/qmd/pull/23
 
+  // Step 0: When searching within a collection, pre-filter to that collection's vectors.
+  // sqlite-vec scans ALL vectors by default (~600K). For a small collection (e.g. 92
+  // vectors for content-topics:click), this is a 6500x search amplification. vec0's
+  // native hash_seq IN constraint applies a bitmap before distance computation —
+  // true pre-filtering, no JOINs involved.
+  let collectionHashSeqs: string[] | null = null;
+  if (collectionName) {
+    collectionHashSeqs = db.prepare(`
+      SELECT cv.hash || '_' || cv.seq as hash_seq
+      FROM content_vectors cv
+      JOIN documents d ON d.hash = cv.hash AND d.active = 1
+      WHERE d.collection = ?
+    `).all(collectionName).map((r: any) => r.hash_seq);
+    if (collectionHashSeqs.length === 0) return [];
+  }
+
   // Step 1: Get vector matches from sqlite-vec (no JOINs allowed)
-  const vecResults = db.prepare(`
-    SELECT hash_seq, distance
-    FROM vectors_vec
-    WHERE embedding MATCH ? AND k = ?
-  `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  // When pre-filtering, use hash_seq IN (json_each) constraint.
+  // Skip pre-filtering for very large collections (>50K vectors) where the
+  // per-ID shadow-table lookup overhead exceeds distance-computation savings.
+  let vecResults: { hash_seq: string; distance: number }[];
+  if (collectionHashSeqs && collectionHashSeqs.length <= 50000) {
+    vecResults = db.prepare(`
+      SELECT hash_seq, distance
+      FROM vectors_vec
+      WHERE embedding MATCH ? AND k = ? AND hash_seq IN (SELECT value FROM json_each(?))
+    `).all(new Float32Array(embedding), limit * 3, JSON.stringify(collectionHashSeqs)) as { hash_seq: string; distance: number }[];
+  } else {
+    vecResults = db.prepare(`
+      SELECT hash_seq, distance
+      FROM vectors_vec
+      WHERE embedding MATCH ? AND k = ?
+    `).all(new Float32Array(embedding), limit * 3) as { hash_seq: string; distance: number }[];
+  }
 
   if (vecResults.length === 0) return [];
 

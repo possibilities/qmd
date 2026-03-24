@@ -3714,6 +3714,10 @@ export async function hybridQuery(
   query: string,
   options?: HybridQueryOptions
 ): Promise<HybridQueryResult[]> {
+  const _profile = process.env.QMD_PROFILE === "1";
+  const timeStart = _profile ? (label: string) => console.time(label) : () => {};
+  const timeEnd = _profile ? (label: string) => console.timeEnd(label) : () => {};
+  timeStart("qmd:total");
   const limit = options?.limit ?? 10;
   const minScore = options?.minScore ?? 0;
   const candidateLimit = options?.candidateLimit ?? RERANK_CANDIDATE_LIMIT;
@@ -3735,7 +3739,9 @@ export async function hybridQuery(
   // match may not be what the caller wants (e.g. "performance" with intent
   // "web page load times" should NOT shortcut to a sports-performance doc).
   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
+  timeStart("qmd:bm25-probe");
   const initialFts = store.searchFTS(query, 20, collection);
+  timeEnd("qmd:bm25-probe");
   const topScore = initialFts[0]?.score ?? 0;
   const secondScore = initialFts[1]?.score ?? 0;
   const hasStrongSignal = !intent && initialFts.length > 0
@@ -3746,10 +3752,12 @@ export async function hybridQuery(
 
   // Step 2: Expand query (or skip if strong signal)
   hooks?.onExpandStart?.();
+  timeStart("qmd:expand");
   const expandStart = Date.now();
   const expanded = hasStrongSignal
     ? []
     : await store.expandQuery(query, undefined, intent);
+  timeEnd("qmd:expand");
 
   hooks?.onExpand?.(query, expanded, Date.now() - expandStart);
 
@@ -3770,6 +3778,7 @@ export async function hybridQuery(
   // sqlite-vec lookups with pre-computed embeddings.
 
   // 3a: Run FTS for all lex expansions right away (no LLM needed)
+  timeStart("qmd:retrieval-lex");
   for (const q of expanded) {
     if (q.type === 'lex') {
       const ftsResults = store.searchFTS(q.query, 20, collection);
@@ -3783,6 +3792,7 @@ export async function hybridQuery(
       }
     }
   }
+  timeEnd("qmd:retrieval-lex");
 
   // 3b: Collect all texts that need vector search (original query + vec/hyde expansions)
   if (hasVectors) {
@@ -3799,11 +3809,14 @@ export async function hybridQuery(
     const llm = getLlm(store);
     const textsToEmbed = vecQueries.map(q => formatQueryForEmbedding(q.text));
     hooks?.onEmbedStart?.(textsToEmbed.length);
+    timeStart("qmd:embed-batch");
     const embedStart = Date.now();
     const embeddings = await llm.embedBatch(textsToEmbed);
+    timeEnd("qmd:embed-batch");
     hooks?.onEmbedDone?.(Date.now() - embedStart);
 
     // Run sqlite-vec lookups with pre-computed embeddings
+    timeStart("qmd:retrieval-vec");
     for (let i = 0; i < vecQueries.length; i++) {
       const embedding = embeddings[i]?.embedding;
       if (!embedding) continue;
@@ -3825,18 +3838,22 @@ export async function hybridQuery(
         });
       }
     }
+    timeEnd("qmd:retrieval-vec");
   }
 
   // Step 4: RRF fusion — first 2 lists (original FTS + first vec) get 2x weight
+  timeStart("qmd:rrf-fusion");
   const weights = rankedLists.map((_, i) => i < 2 ? 2.0 : 1.0);
   const fused = reciprocalRankFusion(rankedLists, weights);
   const rrfTraceByFile = explain ? buildRrfTrace(rankedLists, weights, rankedListMeta) : null;
   const candidates = fused.slice(0, candidateLimit);
+  timeEnd("qmd:rrf-fusion");
 
-  if (candidates.length === 0) return [];
+  if (candidates.length === 0) { timeEnd("qmd:total"); return []; }
 
   // Step 5: Chunk documents, pick best chunk per doc for reranking.
   // Reranking full bodies is O(tokens) — the critical perf lesson that motivated this refactor.
+  timeStart("qmd:chunking");
   const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
   const intentTerms = intent ? extractIntentTerms(intent) : [];
   const docChunkMap = new Map<string, { chunks: { text: string; pos: number }[]; bestIdx: number }>();
@@ -3860,11 +3877,12 @@ export async function hybridQuery(
 
     docChunkMap.set(cand.file, { chunks, bestIdx });
   }
+  timeEnd("qmd:chunking");
 
   if (skipRerank) {
     // Skip LLM reranking — return candidates scored by RRF only
     const seenFiles = new Set<string>();
-    return candidates
+    const skipResult = candidates
       .map((cand, i) => {
         const chunkInfo = docChunkMap.get(cand.file);
         const bestIdx = chunkInfo?.bestIdx ?? 0;
@@ -3909,6 +3927,8 @@ export async function hybridQuery(
       })
       .filter(r => r.score >= minScore)
       .slice(0, limit);
+    timeEnd("qmd:total");
+    return skipResult;
   }
 
   // Step 6: Rerank chunks (NOT full bodies)
@@ -3921,8 +3941,10 @@ export async function hybridQuery(
   }
 
   hooks?.onRerankStart?.(chunksToRerank.length);
+  timeStart("qmd:rerank");
   const rerankStart = Date.now();
   const reranked = await store.rerank(query, chunksToRerank, undefined, intent);
+  timeEnd("qmd:rerank");
   hooks?.onRerankDone?.(Date.now() - rerankStart);
 
   // Step 7: Blend RRF position score with reranker score
@@ -3978,8 +4000,9 @@ export async function hybridQuery(
   }).sort((a, b) => b.score - a.score);
 
   // Step 8: Dedup by file (safety net — prevents duplicate output)
+  timeStart("qmd:blend-dedup");
   const seenFiles = new Set<string>();
-  return blended
+  const finalResult = blended
     .filter(r => {
       if (seenFiles.has(r.file)) return false;
       seenFiles.add(r.file);
@@ -3987,6 +4010,9 @@ export async function hybridQuery(
     })
     .filter(r => r.score >= minScore)
     .slice(0, limit);
+  timeEnd("qmd:blend-dedup");
+  timeEnd("qmd:total");
+  return finalResult;
 }
 
 export interface VectorSearchOptions {

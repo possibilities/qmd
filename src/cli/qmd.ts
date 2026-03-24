@@ -3255,6 +3255,12 @@ if (isMain) {
               ...(r.explain ? { explain: r.explain } : {}),
               ...(req.includeContent && r.body ? { body: r.body } : {}),
             }));
+          } else if (req.command === "model-status") {
+            const llm = getDefaultLlamaCpp();
+            const models = llm.getModelStatus();
+            const device = await llm.getDeviceInfo();
+            process.stdout.write(JSON.stringify({ models, gpu: device }) + "\n");
+            continue;
           } else {
             process.stdout.write(JSON.stringify({ error: `Unknown command: ${req.command}` }) + "\n");
             continue;

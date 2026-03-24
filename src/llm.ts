@@ -1057,18 +1057,36 @@ export class LlamaCpp implements LLM {
       // Qwen3 recommended settings for non-thinking mode:
       // temp=0.7, topP=0.8, topK=20, presence_penalty for repetition
       // DO NOT use greedy decoding (temp=0) - causes infinite loops
+      //
+      // Cap tokens (600→200) and early-stop after 6 lines to prevent
+      // catastrophic latency on novel queries (15s → ~2s).
       timeStart("qmd:expand-inference");
-      const result = await session.prompt(prompt, {
-        grammar,
-        maxTokens: 600,
-        temperature: 0.7,
-        topK: 20,
-        topP: 0.8,
-        repeatPenalty: {
-          lastTokens: 64,
-          presencePenalty: 0.5,
-        },
-      });
+      const expandAbort = new AbortController();
+      let result = "";
+      let newlineCount = 0;
+      try {
+        await session.prompt(prompt, {
+          grammar,
+          maxTokens: 200,
+          temperature: 0.7,
+          topK: 20,
+          topP: 0.8,
+          repeatPenalty: {
+            lastTokens: 64,
+            presencePenalty: 0.5,
+          },
+          signal: expandAbort.signal,
+          onTextChunk: (text) => {
+            result += text;
+            for (const ch of text) {
+              if (ch === "\n") newlineCount++;
+            }
+            if (newlineCount >= 6) expandAbort.abort();
+          },
+        });
+      } catch (e: unknown) {
+        if (!(e instanceof Error) || e.name !== "AbortError") throw e;
+      }
       timeEnd("qmd:expand-inference");
 
       const lines = result.trim().split("\n");

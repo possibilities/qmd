@@ -667,6 +667,7 @@ export class LlamaCpp implements LLM {
       for (let i = 0; i < n; i++) {
         try {
           this.embedContexts.push(await model.createEmbeddingContext({
+            contextSize: model.trainContextSize,
             ...(threads > 0 ? { threads } : {}),
           }));
         } catch {
@@ -845,7 +846,9 @@ export class LlamaCpp implements LLM {
   private async truncateToContextSize(text: string): Promise<{ text: string; truncated: boolean }> {
     if (!this.embedModel) return { text, truncated: false };
 
-    const maxTokens = this.embedModel.trainContextSize;
+    // Use actual context size if available, fall back to train context size
+    const ctx = this.embedContexts[0];
+    const maxTokens = (ctx as any)?._llamaContext?.contextSize || this.embedModel.trainContextSize;
     if (maxTokens <= 0) return { text, truncated: false };
 
     const tokens = this.embedModel.tokenize(text);

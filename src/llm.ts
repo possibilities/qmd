@@ -1227,6 +1227,23 @@ export class LlamaCpp implements LLM {
     };
   }
 
+  /**
+   * Pre-load all models into memory/VRAM without running inference.
+   * Call this at startup to eliminate cold-start latency on first query.
+   */
+  async preloadModels(opts: { embed?: boolean; rerank?: boolean; generate?: boolean } = {}): Promise<void> {
+    const loadEmbed = opts.embed ?? true;
+    const loadRerank = opts.rerank ?? true;
+    const loadGenerate = opts.generate ?? true;
+
+    if (loadEmbed) await this.ensureEmbedContext();
+    if (loadRerank) {
+      await this.ensureRerankModel();
+      await this.ensureRerankContexts();
+    }
+    if (loadGenerate) await this.ensureGenerateModel();
+  }
+
   getModelStatus(): { role: string; name: string; loaded: boolean }[] {
     return [
       { role: "embed", name: this.embedModelUri.split("/").pop()?.replace(/\.gguf$/, "") ?? "unknown", loaded: this.embedModel !== null },
@@ -1530,7 +1547,18 @@ let defaultLlamaCpp: LlamaCpp | null = null;
 export function getDefaultLlamaCpp(): LlamaCpp {
   if (!defaultLlamaCpp) {
     const embedModel = process.env.QMD_EMBED_MODEL;
-    defaultLlamaCpp = new LlamaCpp(embedModel ? { embedModel } : {});
+    const config: LlamaCppConfig = embedModel ? { embedModel } : {};
+
+    // Allow env var override for inactivity timeout (0 = disable context disposal)
+    const timeoutEnv = process.env.QMD_INACTIVITY_TIMEOUT_MS?.trim();
+    if (timeoutEnv !== undefined && timeoutEnv !== "") {
+      const parsed = Number.parseInt(timeoutEnv, 10);
+      if (Number.isInteger(parsed) && parsed >= 0) {
+        config.inactivityTimeoutMs = parsed;
+      }
+    }
+
+    defaultLlamaCpp = new LlamaCpp(config);
   }
   return defaultLlamaCpp;
 }

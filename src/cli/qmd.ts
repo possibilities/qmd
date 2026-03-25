@@ -3180,8 +3180,22 @@ if (isMain) {
       const store = getStore();
       const rl = createInterface({ input: process.stdin });
 
-      // Signal readiness so the client knows we're alive
+      // Signal readiness immediately so BM25/lex queries can start.
       process.stdout.write('{"ready":true}\n');
+
+      // Pre-load all GPU models in the background so VRAM stays warm.
+      // Uses preloadModels() to load model weights only — no inference.
+      // First hybrid/rerank query will block until models finish loading.
+      const llm = getDefaultLlamaCpp();
+      llm.preloadModels({ embed: true, rerank: true, generate: true }).then(async () => {
+        const device = await llm.getDeviceInfo();
+        if (device.vram) {
+          process.stderr.write(`[pipe-query] VRAM: ${formatBytes(device.vram.used)} used / ${formatBytes(device.vram.total)} total (${formatBytes(device.vram.free)} free)\n`);
+        }
+        process.stderr.write(`[pipe-query] models: ${llm.getModelStatus().filter(m => m.loaded).map(m => m.role).join(", ")}\n`);
+      }).catch((err: Error) => {
+        process.stderr.write(`[pipe-query] model preload failed: ${err.message}\n`);
+      });
 
       for await (const line of rl) {
         try {

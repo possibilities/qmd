@@ -870,7 +870,7 @@ export class LlamaCpp implements LLM {
       // Guard: truncate text that exceeds model context window to prevent GGML crash
       const { text: safeText, truncated } = await this.truncateToContextSize(text);
       if (truncated) {
-        console.warn(`⚠ Text truncated to fit embedding context (${this.embedModel?.trainContextSize} tokens)`);
+        console.warn(`⚠ Text truncated to fit embedding context`);
       }
 
       const embedding = await context.getEmbeddingFor(safeText);
@@ -911,7 +911,7 @@ export class LlamaCpp implements LLM {
           try {
             const { text: safeText, truncated } = await this.truncateToContextSize(text);
             if (truncated) {
-              console.warn(`⚠ Batch text truncated to fit embedding context (${this.embedModel?.trainContextSize} tokens)`);
+              console.warn(`⚠ Batch text truncated to fit embedding context`);
             }
             const embedding = await context.getEmbeddingFor(safeText);
             this.touchActivity();
@@ -939,7 +939,7 @@ export class LlamaCpp implements LLM {
             try {
               const { text: safeText, truncated } = await this.truncateToContextSize(text);
               if (truncated) {
-                console.warn(`⚠ Batch text truncated to fit embedding context (${this.embedModel?.trainContextSize} tokens)`);
+                console.warn(`⚠ Batch text truncated to fit embedding context`);
               }
               const embedding = await ctx.getEmbeddingFor(safeText);
               this.touchActivity();

@@ -1845,7 +1845,7 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       }
       return {
         ...(docid && { docid: `#${docid}` }),
-        score: Math.round(row.score * 10000) / 10000,
+        score: row.score,
         file: toQmdPath(row.displayPath),
         title: row.title,
         ...(row.context && { context: row.context }),
@@ -1959,7 +1959,7 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       }
       const docid = row.docid || (row.hash ? row.hash.slice(0, 6) : "");
       const snippetText = content || "";
-      console.log(`#${docid},${row.score.toFixed(4)},${escapeCSV(toQmdPath(row.displayPath))},${escapeCSV(row.title || "")},${escapeCSV(row.context || "")},${line},${escapeCSV(snippetText)}`);
+      console.log(`#${docid},${row.score},${escapeCSV(toQmdPath(row.displayPath))},${escapeCSV(row.title || "")},${escapeCSV(row.context || "")},${line},${escapeCSV(snippetText)}`);
     }
   }
 }
@@ -2353,7 +2353,7 @@ async function handlePipeRequest(
       }
       output = results.map(r => ({
         docid: `#${r.docid}`,
-        score: Math.round(r.score * 10000) / 10000,
+        score: r.score,
         file: r.file,
         title: r.title,
         ...(r.context && { context: r.context }),
@@ -2365,7 +2365,7 @@ async function handlePipeRequest(
       const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
       output = raw.map(r => ({
         docid: `#${r.docid}`,
-        score: Math.round(r.score * 10000) / 10000,
+        score: r.score,
         file: `qmd://${r.displayPath}`,
         title: r.title,
         ...(r.context && { context: r.context }),
@@ -2394,7 +2394,7 @@ async function handlePipeRequest(
         || req.searches?.[0]?.query || "";
       output = results.map(r => ({
         docid: `#${r.docid}`,
-        score: Math.round(r.score * 10000) / 10000,
+        score: r.score,
         file: r.file,
         title: r.title,
         ...(r.context && { context: r.context }),

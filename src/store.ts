@@ -813,6 +813,11 @@ function rowToNamedCollection(row: StoreCollectionRow): NamedCollection {
   };
 }
 
+export function getAllCollectionNames(db: Database): string[] {
+  return db.prepare(`SELECT DISTINCT collection FROM documents WHERE active = 1`).all()
+    .map((r: any) => r.collection);
+}
+
 export function getStoreCollections(db: Database): NamedCollection[] {
   const rows = db.prepare(`SELECT * FROM store_collections`).all() as StoreCollectionRow[];
   return rows.map(rowToNamedCollection);
@@ -1028,8 +1033,8 @@ export type Store = {
   toVirtualPath: (absolutePath: string) => string | null;
 
   // Search
-  searchFTS: (query: string, limit?: number, collectionName?: string | string[]) => SearchResult[];
-  searchVec: (query: string, model: string, limit?: number, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
+  searchFTS: (query: string, limit?: number, collectionName?: string | string[], since?: string, until?: string) => SearchResult[];
+  searchVec: (query: string, model: string, limit?: number, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[], since?: string, until?: string) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
   expandQuery: (query: string, model?: string, intent?: string) => Promise<ExpandedQuery[]>;
@@ -1508,8 +1513,8 @@ export function createStore(dbPath?: string): Store {
     toVirtualPath: (absolutePath: string) => toVirtualPath(db, absolutePath),
 
     // Search
-    searchFTS: (query: string, limit?: number, collectionName?: string | string[]) => searchFTS(db, query, limit, collectionName),
-    searchVec: (query: string, model: string, limit?: number, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
+    searchFTS: (query: string, limit?: number, collectionName?: string | string[], since?: string, until?: string) => searchFTS(db, query, limit, collectionName, since, until),
+    searchVec: (query: string, model: string, limit?: number, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[], since?: string, until?: string) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding, since, until),
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model, db, intent, store.llm),
@@ -2771,7 +2776,7 @@ export function validateLexQuery(query: string): string | null {
   return null;
 }
 
-export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string | string[]): SearchResult[] {
+export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string | string[], since?: string, until?: string): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
 
@@ -2797,6 +2802,9 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
     sql += ` AND d.collection = ?`;
     params.push(String(collectionName));
   }
+
+  if (since) { sql += ` AND d.modified_at >= ?`; params.push(since); }
+  if (until) { sql += ` AND d.modified_at <= ?`; params.push(until); }
 
   // bm25 lower is better; sort ascending.
   sql += ` ORDER BY bm25_score ASC LIMIT ?`;
@@ -2831,7 +2839,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
 // Vector Search
 // =============================================================================
 
-export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
+export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[], since?: string, until?: string): Promise<SearchResult[]> {
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableExists) return [];
 
@@ -2849,23 +2857,26 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // native hash_seq IN constraint applies a bitmap before distance computation —
   // true pre-filtering, no JOINs involved.
   let collectionHashSeqs: string[] | null = null;
-  if (collectionName) {
+  if (collectionName || since || until) {
+    let filterSql = `
+      SELECT cv.hash || '_' || cv.seq as hash_seq
+      FROM content_vectors cv
+      JOIN documents d ON d.hash = cv.hash AND d.active = 1
+      WHERE 1=1
+    `;
+    const filterParams: string[] = [];
+
     if (Array.isArray(collectionName)) {
-      const placeholders = collectionName.map(() => '?').join(',');
-      collectionHashSeqs = db.prepare(`
-        SELECT cv.hash || '_' || cv.seq as hash_seq
-        FROM content_vectors cv
-        JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE d.collection IN (${placeholders})
-      `).all(...collectionName).map((r: any) => r.hash_seq);
-    } else {
-      collectionHashSeqs = db.prepare(`
-        SELECT cv.hash || '_' || cv.seq as hash_seq
-        FROM content_vectors cv
-        JOIN documents d ON d.hash = cv.hash AND d.active = 1
-        WHERE d.collection = ?
-      `).all(collectionName).map((r: any) => r.hash_seq);
+      filterSql += ` AND d.collection IN (${collectionName.map(() => '?').join(',')})`;
+      filterParams.push(...collectionName);
+    } else if (collectionName) {
+      filterSql += ` AND d.collection = ?`;
+      filterParams.push(collectionName);
     }
+    if (since) { filterSql += ` AND d.modified_at >= ?`; filterParams.push(since); }
+    if (until) { filterSql += ` AND d.modified_at <= ?`; filterParams.push(until); }
+
+    collectionHashSeqs = db.prepare(filterSql).all(...filterParams).map((r: any) => r.hash_seq);
     if (collectionHashSeqs.length === 0) return [];
   }
 
@@ -2919,6 +2930,9 @@ export async function searchVec(db: Database, query: string, model: string, limi
     docSql += ` AND d.collection = ?`;
     params.push(collectionName);
   }
+
+  if (since) { docSql += ` AND d.modified_at >= ?`; params.push(since); }
+  if (until) { docSql += ` AND d.modified_at <= ?`; params.push(until); }
 
   const docRows = db.prepare(docSql).all(...params) as {
     hash_seq: string; hash: string; pos: number; filepath: string;
@@ -3744,6 +3758,10 @@ export interface HybridQueryOptions {
   intent?: string;          // domain intent hint for disambiguation
   skipRerank?: boolean;     // skip LLM reranking, use only RRF scores
   hooks?: SearchHooks;
+  /** ISO 8601 date — only include documents modified on or after this date */
+  since?: string;
+  /** ISO 8601 date — only include documents modified on or before this date */
+  until?: string;
 }
 
 export interface HybridQueryResult {
@@ -3795,6 +3813,8 @@ export async function hybridQuery(
   const intent = options?.intent;
   const skipRerank = options?.skipRerank ?? false;
   const hooks = options?.hooks;
+  const since = options?.since;
+  const until = options?.until;
 
   const rankedLists: RankedResult[][] = [];
   const rankedListMeta: RankedListMeta[] = [];
@@ -3809,7 +3829,7 @@ export async function hybridQuery(
   // "web page load times" should NOT shortcut to a sports-performance doc).
   // Pass collection directly into FTS query (filter at SQL level, not post-hoc)
   timeStart("qmd:bm25-probe");
-  const initialFts = store.searchFTS(query, 20, collection);
+  const initialFts = store.searchFTS(query, 20, collection, since, until);
   timeEnd("qmd:bm25-probe");
   const topScore = initialFts[0]?.score ?? 0;
   const secondScore = initialFts[1]?.score ?? 0;
@@ -3850,7 +3870,7 @@ export async function hybridQuery(
   timeStart("qmd:retrieval-lex");
   for (const q of expanded) {
     if (q.type === 'lex') {
-      const ftsResults = store.searchFTS(q.query, 20, collection);
+      const ftsResults = store.searchFTS(q.query, 20, collection, since, until);
       if (ftsResults.length > 0) {
         for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
         rankedLists.push(ftsResults.map(r => ({
@@ -3892,7 +3912,7 @@ export async function hybridQuery(
 
       const vecResults = await store.searchVec(
         vecQueries[i]!.text, DEFAULT_EMBED_MODEL, 20, collection,
-        undefined, embedding
+        undefined, embedding, since, until
       );
       if (vecResults.length > 0) {
         for (const r of vecResults) docidMap.set(r.filepath, r.docid);
@@ -4090,6 +4110,8 @@ export interface VectorSearchOptions {
   minScore?: number;        // default 0.3
   intent?: string;          // domain intent hint for disambiguation
   hooks?: Pick<SearchHooks, 'onExpand'>;
+  since?: string;
+  until?: string;
 }
 
 export interface VectorSearchResult {
@@ -4120,6 +4142,8 @@ export async function vectorSearchQuery(
   const minScore = options?.minScore ?? 0.3;
   const collection = options?.collection;
   const intent = options?.intent;
+  const since = options?.since;
+  const until = options?.until;
 
   const hasVectors = !!store.db.prepare(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
@@ -4136,7 +4160,7 @@ export async function vectorSearchQuery(
   const queryTexts = [query, ...vecExpanded.map(q => q.query)];
   const allResults = new Map<string, VectorSearchResult>();
   for (const q of queryTexts) {
-    const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, limit, collection);
+    const vecResults = await store.searchVec(q, DEFAULT_EMBED_MODEL, limit, collection, undefined, undefined, since, until);
     for (const r of vecResults) {
       const existing = allResults.get(r.filepath);
       if (!existing || r.score > existing.score) {
@@ -4177,6 +4201,10 @@ export interface StructuredSearchOptions {
   intent?: string;
   /** Skip LLM reranking, use only RRF scores */
   skipRerank?: boolean;
+  /** ISO 8601 date — only include documents modified on or after this date */
+  since?: string;
+  /** ISO 8601 date — only include documents modified on or before this date */
+  until?: string;
   hooks?: SearchHooks;
 }
 
@@ -4212,6 +4240,8 @@ export async function structuredSearch(
   const hooks = options?.hooks;
 
   const collections = options?.collections;
+  const since = options?.since;
+  const until = options?.until;
 
   if (searches.length === 0) return [];
 
@@ -4244,7 +4274,7 @@ export async function structuredSearch(
   // Step 1: Run FTS for all lex searches (sync, instant)
   for (const search of searches) {
     if (search.type === 'lex') {
-      const ftsResults = store.searchFTS(search.query, 20, collections);
+      const ftsResults = store.searchFTS(search.query, 20, collections, since, until);
       if (ftsResults.length > 0) {
         for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
         rankedLists.push(ftsResults.map(r => ({
@@ -4280,7 +4310,7 @@ export async function structuredSearch(
 
         const vecResults = await store.searchVec(
           vecSearches[i]!.query, DEFAULT_EMBED_MODEL, 20, collections,
-          undefined, embedding
+          undefined, embedding, since, until
         );
         if (vecResults.length > 0) {
           for (const r of vecResults) docidMap.set(r.filepath, r.docid);

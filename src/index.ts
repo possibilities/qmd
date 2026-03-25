@@ -161,6 +161,10 @@ export interface SearchOptions {
   minScore?: number;
   /** Include explain traces */
   explain?: boolean;
+  /** ISO 8601 date — only include documents modified on or after this date */
+  since?: string;
+  /** ISO 8601 date — only include documents modified on or before this date */
+  until?: string;
 }
 
 /**
@@ -391,6 +395,8 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
           explain: opts.explain,
           intent: opts.intent,
           skipRerank,
+          since: opts.since,
+          until: opts.until,
         });
       }
 

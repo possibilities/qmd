@@ -74,6 +74,7 @@ import {
   reindexCollection,
   generateEmbeddings,
   syncConfigToDb,
+  getAllCollectionNames,
   type ReindexResult,
 } from "../store.js";
 import { disposeDefaultLlamaCpp, getDefaultLlamaCpp, withLLMSession, pullModels, DEFAULT_EMBED_MODEL_URI, DEFAULT_GENERATE_MODEL_URI, DEFAULT_RERANK_MODEL_URI, DEFAULT_MODEL_CACHE_DIR } from "../llm.js";
@@ -1746,6 +1747,8 @@ type OutputOptions = {
   candidateLimit?: number;  // Max candidates to rerank (default: 40)
   intent?: string;       // Domain intent for disambiguation
   skipRerank?: boolean;  // Skip LLM reranking, use RRF scores only
+  since?: string;        // ISO 8601 date — only docs modified on/after
+  until?: string;        // ISO 8601 date — only docs modified on/before
 };
 
 // Highlight query terms in text (skip short words < 3 chars)
@@ -1975,13 +1978,27 @@ function resolveCollectionFilter(raw: string | string[] | undefined, useDefaults
   const names = Array.isArray(raw) ? raw : [raw];
   const validated: string[] = [];
   for (const name of names) {
-    const coll = getCollectionFromYaml(name);
-    if (!coll) {
-      console.error(`Collection not found: ${name}`);
-      closeDb();
-      process.exit(1);
+    if (/[*?]/.test(name)) {
+      // Glob: match against all indexed collection names
+      const db = getDb();
+      const allNames = getAllCollectionNames(db);
+      const re = new RegExp("^" + name.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + "$");
+      const matched = allNames.filter(n => re.test(n));
+      if (matched.length === 0) {
+        console.error(`No collections match pattern: ${name}`);
+        closeDb();
+        process.exit(1);
+      }
+      validated.push(...matched);
+    } else {
+      const coll = getCollectionFromYaml(name);
+      if (!coll) {
+        console.error(`Collection not found: ${name}`);
+        closeDb();
+        process.exit(1);
+      }
+      validated.push(name);
     }
-    validated.push(name);
   }
   return validated;
 }
@@ -2097,7 +2114,7 @@ function search(query: string, opts: OutputOptions): void {
   // Use large limit for --all, otherwise fetch more than needed and let outputResults filter
   const fetchLimit = opts.all ? 100000 : Math.max(50, opts.limit * 2);
   const results = filterByCollections(
-    searchFTS(db, query, fetchLimit, singleCollection),
+    searchFTS(db, query, fetchLimit, singleCollection, opts.since, opts.until),
     collectionNames
   );
 
@@ -2231,6 +2248,8 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         skipRerank: opts.skipRerank,
         explain: !!opts.explain,
         intent,
+        since: opts.since,
+        until: opts.until,
         hooks: {
           onEmbedStart: (count) => {
             process.stderr.write(`${c.dim}Embedding ${count} ${count === 1 ? 'query' : 'queries'}...${c.reset}`);
@@ -2258,6 +2277,8 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
         skipRerank: opts.skipRerank,
         explain: !!opts.explain,
         intent,
+        since: opts.since,
+        until: opts.until,
         hooks: {
           onStrongSignal: (score) => {
             process.stderr.write(`${c.dim}Strong BM25 signal (${score.toFixed(2)}) — skipping expansion${c.reset}\n`);
@@ -2345,6 +2366,8 @@ async function handlePipeRequest(
         intent: req.intent,
         candidateLimit: req.candidateLimit,
         minScore: req.minScore,
+        since: req.since,
+        until: req.until,
       });
       let results = raw;
       if (collectionNames && collectionNames.length > 1) {
@@ -2362,7 +2385,7 @@ async function handlePipeRequest(
         ...(req.includeContent && r.body ? { body: r.body } : {}),
       }));
     } else if (req.command === "search") {
-      const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
+      const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection, req.since, req.until);
       output = raw.map(r => ({
         docid: `#${r.docid}`,
         score: r.score,
@@ -2383,6 +2406,8 @@ async function handlePipeRequest(
         intent: req.intent,
         candidateLimit: req.candidateLimit,
         minScore: req.minScore,
+        since: req.since,
+        until: req.until,
       });
       let results = raw;
       if (collectionNames && collectionNames.length > 1) {
@@ -2475,6 +2500,8 @@ function parseCLI() {
       "candidate-limit": { type: "string", short: "C" },
       "no-rerank": { type: "boolean", default: false },
       intent: { type: "string" },
+      since: { type: "string" },
+      until: { type: "string" },
       // MCP HTTP transport options
       http: { type: "boolean" },
       daemon: { type: "boolean" },
@@ -2518,6 +2545,8 @@ function parseCLI() {
     skipRerank: !!values["no-rerank"],
     explain: !!values.explain,
     intent: values.intent as string | undefined,
+    since: values.since as string | undefined,
+    until: values.until as string | undefined,
   };
 
   return {

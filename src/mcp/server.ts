@@ -293,12 +293,14 @@ Intent-aware lex (C++ performance, not sports):
           "Maximum candidates to rerank (default: 40, lower = faster but may miss results)"
         ),
         collections: z.array(z.string()).optional().describe("Filter to collections (OR match)"),
+        since: z.string().optional().describe("ISO 8601 date — only docs modified on or after this date"),
+        until: z.string().optional().describe("ISO 8601 date — only docs modified on or before this date"),
         intent: z.string().optional().describe(
           "Background context to disambiguate the query. Example: query='performance', intent='web page load times and Core Web Vitals'. Does not search on its own."
         ),
       },
     },
-    async ({ searches, limit, minScore, candidateLimit, collections, intent }) => {
+    async ({ searches, limit, minScore, candidateLimit, collections, since, until, intent }) => {
       // Map to internal format
       const queries: ExpandedQuery[] = searches.map(s => ({
         type: s.type,
@@ -314,6 +316,8 @@ Intent-aware lex (C++ performance, not sports):
         limit,
         minScore,
         intent,
+        since,
+        until,
       });
 
       // Use first lex or vec query for snippet extraction

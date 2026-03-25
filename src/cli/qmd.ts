@@ -2438,8 +2438,8 @@ async function handlePipeRequest(
       }
       const result = await generateEmbeddings(store, {
         force: req.force,
-        maxDocsPerBatch: req.maxDocsPerBatch,
-        maxBatchBytes: req.maxBatchBytes,
+        maxDocsPerBatch: req.maxDocsPerBatch ?? 50,
+        maxBatchBytes: req.maxBatchBytes ?? 10 * 1024 * 1024,
       });
       writeLine(JSON.stringify(result));
       return;

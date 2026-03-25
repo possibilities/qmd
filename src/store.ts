@@ -1403,12 +1403,14 @@ export async function generateEmbeddings(
               insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(embedding.embedding), model, now);
               chunksEmbedded++;
             } else {
+              console.warn(`[embed] chunk failed (null result): hash=${chunk.hash} seq=${chunk.seq} title="${chunk.title}" bytes=${chunk.bytes} textLen=${chunk.text.length}`);
               errors++;
             }
             batchChunkBytesProcessed += chunk.bytes;
           }
-        } catch {
+        } catch (batchErr) {
           // Batch failed — try individual embeddings as fallback
+          console.warn(`[embed] batch failed (${chunkBatch.length} chunks), retrying individually: ${batchErr}`);
           for (const chunk of chunkBatch) {
             try {
               const text = formatDocForEmbedding(chunk.text, chunk.title);
@@ -1417,9 +1419,11 @@ export async function generateEmbeddings(
                 insertEmbedding(db, chunk.hash, chunk.seq, chunk.pos, new Float32Array(result.embedding), model, now);
                 chunksEmbedded++;
               } else {
+                console.warn(`[embed] chunk failed (null result on retry): hash=${chunk.hash} seq=${chunk.seq} title="${chunk.title}" bytes=${chunk.bytes} textLen=${chunk.text.length}`);
                 errors++;
               }
-            } catch {
+            } catch (chunkErr) {
+              console.warn(`[embed] chunk threw on retry: hash=${chunk.hash} seq=${chunk.seq} title="${chunk.title}" bytes=${chunk.bytes} textLen=${chunk.text.length} error=${chunkErr}`);
               errors++;
             }
             batchChunkBytesProcessed += chunk.bytes;

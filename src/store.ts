@@ -1028,8 +1028,8 @@ export type Store = {
   toVirtualPath: (absolutePath: string) => string | null;
 
   // Search
-  searchFTS: (query: string, limit?: number, collectionName?: string) => SearchResult[];
-  searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
+  searchFTS: (query: string, limit?: number, collectionName?: string | string[]) => SearchResult[];
+  searchVec: (query: string, model: string, limit?: number, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[]) => Promise<SearchResult[]>;
 
   // Query expansion & reranking
   expandQuery: (query: string, model?: string, intent?: string) => Promise<ExpandedQuery[]>;
@@ -1508,8 +1508,8 @@ export function createStore(dbPath?: string): Store {
     toVirtualPath: (absolutePath: string) => toVirtualPath(db, absolutePath),
 
     // Search
-    searchFTS: (query: string, limit?: number, collectionName?: string) => searchFTS(db, query, limit, collectionName),
-    searchVec: (query: string, model: string, limit?: number, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
+    searchFTS: (query: string, limit?: number, collectionName?: string | string[]) => searchFTS(db, query, limit, collectionName),
+    searchVec: (query: string, model: string, limit?: number, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[]) => searchVec(db, query, model, limit, collectionName, session, precomputedEmbedding),
 
     // Query expansion & reranking
     expandQuery: (query: string, model?: string, intent?: string) => expandQuery(query, model, db, intent, store.llm),
@@ -2771,7 +2771,7 @@ export function validateLexQuery(query: string): string | null {
   return null;
 }
 
-export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string): SearchResult[] {
+export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string | string[]): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
 
@@ -2790,7 +2790,10 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   `;
   const params: (string | number)[] = [ftsQuery];
 
-  if (collectionName) {
+  if (Array.isArray(collectionName)) {
+    sql += ` AND d.collection IN (${collectionName.map(() => '?').join(',')})`;
+    params.push(...collectionName);
+  } else if (collectionName) {
     sql += ` AND d.collection = ?`;
     params.push(String(collectionName));
   }
@@ -2828,7 +2831,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
 // Vector Search
 // =============================================================================
 
-export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string, session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
+export async function searchVec(db: Database, query: string, model: string, limit: number = 20, collectionName?: string | string[], session?: ILLMSession, precomputedEmbedding?: number[]): Promise<SearchResult[]> {
   const tableExists = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`).get();
   if (!tableExists) return [];
 
@@ -2847,12 +2850,22 @@ export async function searchVec(db: Database, query: string, model: string, limi
   // true pre-filtering, no JOINs involved.
   let collectionHashSeqs: string[] | null = null;
   if (collectionName) {
-    collectionHashSeqs = db.prepare(`
-      SELECT cv.hash || '_' || cv.seq as hash_seq
-      FROM content_vectors cv
-      JOIN documents d ON d.hash = cv.hash AND d.active = 1
-      WHERE d.collection = ?
-    `).all(collectionName).map((r: any) => r.hash_seq);
+    if (Array.isArray(collectionName)) {
+      const placeholders = collectionName.map(() => '?').join(',');
+      collectionHashSeqs = db.prepare(`
+        SELECT cv.hash || '_' || cv.seq as hash_seq
+        FROM content_vectors cv
+        JOIN documents d ON d.hash = cv.hash AND d.active = 1
+        WHERE d.collection IN (${placeholders})
+      `).all(...collectionName).map((r: any) => r.hash_seq);
+    } else {
+      collectionHashSeqs = db.prepare(`
+        SELECT cv.hash || '_' || cv.seq as hash_seq
+        FROM content_vectors cv
+        JOIN documents d ON d.hash = cv.hash AND d.active = 1
+        WHERE d.collection = ?
+      `).all(collectionName).map((r: any) => r.hash_seq);
+    }
     if (collectionHashSeqs.length === 0) return [];
   }
 
@@ -2899,7 +2912,10 @@ export async function searchVec(db: Database, query: string, model: string, limi
   `;
   const params: string[] = [...hashSeqs];
 
-  if (collectionName) {
+  if (Array.isArray(collectionName)) {
+    docSql += ` AND d.collection IN (${collectionName.map(() => '?').join(',')})`;
+    params.push(...collectionName);
+  } else if (collectionName) {
     docSql += ` AND d.collection = ?`;
     params.push(collectionName);
   }
@@ -4225,26 +4241,21 @@ export async function structuredSearch(
     `SELECT name FROM sqlite_master WHERE type='table' AND name='vectors_vec'`
   ).get();
 
-  // Helper to run search across collections (or all if undefined)
-  const collectionList = collections ?? [undefined]; // undefined = all collections
-
   // Step 1: Run FTS for all lex searches (sync, instant)
   for (const search of searches) {
     if (search.type === 'lex') {
-      for (const coll of collectionList) {
-        const ftsResults = store.searchFTS(search.query, 20, coll);
-        if (ftsResults.length > 0) {
-          for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
-          rankedLists.push(ftsResults.map(r => ({
-            file: r.filepath, displayPath: r.displayPath,
-            title: r.title, body: r.body || "", score: r.score,
-          })));
-          rankedListMeta.push({
-            source: "fts",
-            queryType: "lex",
-            query: search.query,
-          });
-        }
+      const ftsResults = store.searchFTS(search.query, 20, collections);
+      if (ftsResults.length > 0) {
+        for (const r of ftsResults) docidMap.set(r.filepath, r.docid);
+        rankedLists.push(ftsResults.map(r => ({
+          file: r.filepath, displayPath: r.displayPath,
+          title: r.title, body: r.body || "", score: r.score,
+        })));
+        rankedListMeta.push({
+          source: "fts",
+          queryType: "lex",
+          query: search.query,
+        });
       }
     }
   }
@@ -4267,23 +4278,21 @@ export async function structuredSearch(
         const embedding = embeddings[i]?.embedding;
         if (!embedding) continue;
 
-        for (const coll of collectionList) {
-          const vecResults = await store.searchVec(
-            vecSearches[i]!.query, DEFAULT_EMBED_MODEL, 20, coll,
-            undefined, embedding
-          );
-          if (vecResults.length > 0) {
-            for (const r of vecResults) docidMap.set(r.filepath, r.docid);
-            rankedLists.push(vecResults.map(r => ({
-              file: r.filepath, displayPath: r.displayPath,
-              title: r.title, body: r.body || "", score: r.score,
-            })));
-            rankedListMeta.push({
-              source: "vec",
-              queryType: vecSearches[i]!.type,
-              query: vecSearches[i]!.query,
-            });
-          }
+        const vecResults = await store.searchVec(
+          vecSearches[i]!.query, DEFAULT_EMBED_MODEL, 20, collections,
+          undefined, embedding
+        );
+        if (vecResults.length > 0) {
+          for (const r of vecResults) docidMap.set(r.filepath, r.docid);
+          rankedLists.push(vecResults.map(r => ({
+            file: r.filepath, displayPath: r.displayPath,
+            title: r.title, body: r.body || "", score: r.score,
+          })));
+          rankedListMeta.push({
+            source: "vec",
+            queryType: vecSearches[i]!.type,
+            query: vecSearches[i]!.query,
+          });
         }
       }
     }

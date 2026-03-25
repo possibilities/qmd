@@ -2999,7 +2999,18 @@ export function insertEmbedding(
   const insertContentVectorStmt = db.prepare(`INSERT OR REPLACE INTO content_vectors (hash, seq, pos, model, embedded_at) VALUES (?, ?, ?, ?, ?)`);
 
   deleteVecStmt.run(hashSeq);
-  insertVecStmt.run(hashSeq, embedding);
+  try {
+    insertVecStmt.run(hashSeq, embedding);
+  } catch (err: any) {
+    if (err?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || err?.message?.includes('UNIQUE constraint')) {
+      // vec0 DELETE may silently no-op — force delete and retry once
+      console.warn(`[embed] vec0 UNIQUE retry: hash_seq=${hashSeq}`);
+      deleteVecStmt.run(hashSeq);
+      insertVecStmt.run(hashSeq, embedding);
+    } else {
+      throw err;
+    }
+  }
   insertContentVectorStmt.run(hash, seq, pos, model, embeddedAt);
 }
 

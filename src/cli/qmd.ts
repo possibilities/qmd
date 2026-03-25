@@ -2170,6 +2170,8 @@ async function vectorSearch(query: string, opts: OutputOptions, _model: string =
       limit: opts.all ? 500 : (opts.limit || 10),
       minScore: opts.minScore || 0.3,
       intent: opts.intent,
+      since: opts.since,
+      until: opts.until,
       hooks: {
         onExpand: (original, expanded) => {
           logExpansionTree(original, expanded);

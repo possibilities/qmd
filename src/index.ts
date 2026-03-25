@@ -173,6 +173,8 @@ export interface SearchOptions {
 export interface LexSearchOptions {
   limit?: number;
   collection?: string;
+  since?: string;
+  until?: string;
 }
 
 /**
@@ -181,6 +183,8 @@ export interface LexSearchOptions {
 export interface VectorSearchOptions {
   limit?: number;
   collection?: string;
+  since?: string;
+  until?: string;
 }
 
 /**
@@ -408,10 +412,12 @@ export async function createStore(options: StoreOptions): Promise<QMDStore> {
         explain: opts.explain,
         intent: opts.intent,
         skipRerank,
+        since: opts.since,
+        until: opts.until,
       });
     },
-    searchLex: async (q, opts) => internal.searchFTS(q, opts?.limit, opts?.collection),
-    searchVector: async (q, opts) => internal.searchVec(q, DEFAULT_EMBED_MODEL, opts?.limit, opts?.collection),
+    searchLex: async (q, opts) => internal.searchFTS(q, opts?.limit, opts?.collection, opts?.since, opts?.until),
+    searchVector: async (q, opts) => internal.searchVec(q, DEFAULT_EMBED_MODEL, opts?.limit, opts?.collection, undefined, undefined, opts?.since, opts?.until),
     expandQuery: async (q, opts) => internal.expandQuery(q, undefined, opts?.intent),
     get: async (pathOrDocid, opts) => internal.findDocument(pathOrDocid, opts),
     getDocumentBody: async (pathOrDocid, opts) => {

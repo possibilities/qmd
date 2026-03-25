@@ -2403,6 +2403,12 @@ async function handlePipeRequest(
         ...(req.includeContent && r.body ? { body: r.body } : {}),
       }));
     } else if (req.command === "generate-embeddings") {
+      // Respect pause flag — return immediately with zero work
+      const pauseFile = resolve(homedir(), ".local/state/qmdctl/embed-paused");
+      if (existsSync(pauseFile)) {
+        writeLine(JSON.stringify({ docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0, paused: true }));
+        return;
+      }
       const result = await generateEmbeddings(store, {
         force: req.force,
         maxDocsPerBatch: req.maxDocsPerBatch,

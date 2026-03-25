@@ -2324,6 +2324,103 @@ async function querySearch(query: string, opts: OutputOptions, _embedModel: stri
   }, { maxDuration: 10 * 60 * 1000, name: 'querySearch' });
 }
 
+// Shared request handler for pipe-query (used by both stdin and socket transports)
+async function handlePipeRequest(
+  line: string,
+  store: ReturnType<typeof createStore>,
+  writeLine: (s: string) => void,
+): Promise<void> {
+  try {
+    const req = JSON.parse(line);
+    let output: any[];
+
+    if (req.command === "query") {
+      const collectionNames: string[] | undefined = req.collections;
+      const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
+      const raw = await hybridQuery(store, req.query, {
+        collection: singleCollection,
+        limit: req.limit ?? 10,
+        skipRerank: req.skipRerank ?? false,
+        explain: req.explain ?? false,
+        intent: req.intent,
+        candidateLimit: req.candidateLimit,
+        minScore: req.minScore,
+      });
+      let results = raw;
+      if (collectionNames && collectionNames.length > 1) {
+        const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
+        results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
+      }
+      output = results.map(r => ({
+        docid: `#${r.docid}`,
+        score: Math.round(r.score * 100) / 100,
+        file: r.file,
+        title: r.title,
+        ...(r.context && { context: r.context }),
+        snippet: extractSnippet(r.bestChunk || r.body || "", req.query, 300, r.bestChunkPos).snippet,
+        ...(r.explain ? { explain: r.explain } : {}),
+        ...(req.includeContent && r.body ? { body: r.body } : {}),
+      }));
+    } else if (req.command === "search") {
+      const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
+      output = raw.map(r => ({
+        docid: `#${r.docid}`,
+        score: Math.round(r.score * 100) / 100,
+        file: `qmd://${r.displayPath}`,
+        title: r.title,
+        ...(r.context && { context: r.context }),
+        snippet: extractSnippet(r.body || "", req.query, 300).snippet,
+        ...(req.includeContent && r.body ? { body: r.body } : {}),
+      }));
+    } else if (req.command === "structured-search") {
+      const collectionNames: string[] | undefined = req.collections;
+      const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
+      const raw = await structuredSearch(store, req.searches, {
+        collections: singleCollection ? [singleCollection] : undefined,
+        limit: req.limit ?? 10,
+        skipRerank: req.skipRerank ?? false,
+        explain: req.explain ?? false,
+        intent: req.intent,
+        candidateLimit: req.candidateLimit,
+        minScore: req.minScore,
+      });
+      let results = raw;
+      if (collectionNames && collectionNames.length > 1) {
+        const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
+        results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
+      }
+      const displayQuery = req.searches?.find((s: any) => s.type === 'lex')?.query
+        || req.searches?.find((s: any) => s.type === 'vec')?.query
+        || req.searches?.[0]?.query || "";
+      output = results.map(r => ({
+        docid: `#${r.docid}`,
+        score: Math.round(r.score * 100) / 100,
+        file: r.file,
+        title: r.title,
+        ...(r.context && { context: r.context }),
+        snippet: extractSnippet(r.bestChunk || r.body || "", displayQuery, 300, r.bestChunkPos).snippet,
+        ...(r.explain ? { explain: r.explain } : {}),
+        ...(req.includeContent && r.body ? { body: r.body } : {}),
+      }));
+    } else if (req.command === "generate-embeddings") {
+      const result = await generateEmbeddings(store, {
+        force: req.force,
+        maxDocsPerBatch: req.maxDocsPerBatch,
+        maxBatchBytes: req.maxBatchBytes,
+      });
+      writeLine(JSON.stringify(result));
+      return;
+    } else {
+      writeLine(JSON.stringify({ error: `Unknown command: ${req.command}` }));
+      return;
+    }
+
+    writeLine(JSON.stringify(output));
+  } catch (err: any) {
+    writeLine(JSON.stringify({ error: err?.message || String(err) }));
+  }
+}
+
 // Parse CLI arguments using util.parseArgs
 function parseCLI() {
   const { values, positionals } = parseArgs({
@@ -2376,6 +2473,8 @@ function parseCLI() {
       http: { type: "boolean" },
       daemon: { type: "boolean" },
       port: { type: "string" },
+      // pipe-query socket mode
+      socket: { type: "string" },
     },
     allowPositionals: true,
     strict: false, // Allow unknown options to pass through
@@ -3174,96 +3273,65 @@ if (isMain) {
     }
 
     case "pipe-query": {
-      // Persistent JSONL query server: reads requests from stdin, writes JSON to stdout.
+      // Persistent JSONL query server.
       // Keeps store + LLM models loaded across queries to eliminate per-call Bun startup.
       // Protocol: one JSON object per line in, one JSON array/object per line out.
+      //
+      // Transports:
+      //   stdin/stdout (default) — for development/debugging
+      //   --socket PATH          — Unix domain socket server for production daemon use
+
       const store = getStore();
-      const rl = createInterface({ input: process.stdin });
+      const socketPath = cli.values.socket as string | undefined;
 
-      // Signal readiness so the client knows we're alive
-      process.stdout.write('{"ready":true}\n');
+      if (socketPath) {
+        // ── Unix socket server mode ──────────────────────────────
+        const { createServer } = await import("net");
 
-      for await (const line of rl) {
-        try {
-          const req = JSON.parse(line);
-          let output: any[];
+        // Remove stale socket file
+        try { unlinkSync(socketPath); } catch {}
 
-          if (req.command === "query") {
-            const collectionNames: string[] | undefined = req.collections;
-            const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
-            const raw = await hybridQuery(store, req.query, {
-              collection: singleCollection,
-              limit: req.limit ?? 10,
-              skipRerank: req.skipRerank ?? false,
-              explain: req.explain ?? false,
-              intent: req.intent,
-              candidateLimit: req.candidateLimit,
-              minScore: req.minScore,
-            });
-            // Post-filter for multi-collection
-            let results = raw;
-            if (collectionNames && collectionNames.length > 1) {
-              const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
-              results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
-            }
-            output = results.map(r => ({
-              docid: `#${r.docid}`,
-              score: Math.round(r.score * 100) / 100,
-              file: r.file,
-              title: r.title,
-              ...(r.context && { context: r.context }),
-              snippet: extractSnippet(r.bestChunk || r.body || "", req.query, 300, r.bestChunkPos).snippet,
-              ...(r.explain ? { explain: r.explain } : {}),
-            }));
-          } else if (req.command === "search") {
-            const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
-            output = raw.map(r => ({
-              docid: `#${r.docid}`,
-              score: Math.round(r.score * 100) / 100,
-              file: `qmd://${r.displayPath}`,
-              title: r.title,
-              ...(r.context && { context: r.context }),
-              snippet: extractSnippet(r.body || "", req.query, 300).snippet,
-            }));
-          } else if (req.command === "structured-search") {
-            const collectionNames: string[] | undefined = req.collections;
-            const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
-            const raw = await structuredSearch(store, req.searches, {
-              collections: singleCollection ? [singleCollection] : undefined,
-              limit: req.limit ?? 10,
-              skipRerank: req.skipRerank ?? false,
-              explain: req.explain ?? false,
-              intent: req.intent,
-              candidateLimit: req.candidateLimit,
-              minScore: req.minScore,
-            });
-            // Post-filter for multi-collection
-            let results = raw;
-            if (collectionNames && collectionNames.length > 1) {
-              const prefixes = collectionNames.map((n: string) => `qmd://${n}/`);
-              results = results.filter(r => prefixes.some(p => r.file.startsWith(p)));
-            }
-            output = results.map(r => ({
-              docid: `#${r.docid}`,
-              score: Math.round(r.score * 100) / 100,
-              file: r.file,
-              title: r.title,
-              ...(r.context && { context: r.context }),
-              snippet: extractSnippet(r.bestChunk || r.body || "", req.query || "", 300, r.bestChunkPos).snippet,
-              ...(r.explain ? { explain: r.explain } : {}),
-            }));
-          } else {
-            process.stdout.write(JSON.stringify({ error: `Unknown command: ${req.command}` }) + "\n");
-            continue;
-          }
+        const server = createServer((conn) => {
+          const connRl = createInterface({ input: conn });
+          const writeLine = (s: string) => { conn.write(s + "\n"); };
 
-          process.stdout.write(JSON.stringify(output) + "\n");
-        } catch (err: any) {
-          process.stdout.write(JSON.stringify({ error: err?.message || String(err) }) + "\n");
+          // Per-connection ready signal
+          writeLine('{"ready":true}');
+
+          connRl.on("line", async (line: string) => {
+            await handlePipeRequest(line, store, writeLine);
+          });
+
+          conn.on("error", () => { connRl.close(); });
+        });
+
+        server.listen(socketPath, () => {
+          process.stderr.write(`[pipe-query] listening on ${socketPath}\n`);
+        });
+
+        // Graceful shutdown
+        const shutdown = () => {
+          process.stderr.write("[pipe-query] shutting down\n");
+          server.close();
+          closeDb();
+          process.exit(0);
+        };
+        process.on("SIGTERM", shutdown);
+        process.on("SIGINT", shutdown);
+
+      } else {
+        // ── stdin/stdout mode (original) ─────────────────────────
+        const rl = createInterface({ input: process.stdin });
+        const writeLine = (s: string) => { process.stdout.write(s + "\n"); };
+
+        writeLine('{"ready":true}');
+
+        for await (const line of rl) {
+          await handlePipeRequest(line, store, writeLine);
         }
-      }
 
-      closeDb();
+        closeDb();
+      }
       break;
     }
 

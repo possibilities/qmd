@@ -667,7 +667,6 @@ export class LlamaCpp implements LLM {
       for (let i = 0; i < n; i++) {
         try {
           this.embedContexts.push(await model.createEmbeddingContext({
-            contextSize: model.trainContextSize,
             ...(threads > 0 ? { threads } : {}),
           }));
         } catch {

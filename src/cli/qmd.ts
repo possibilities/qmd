@@ -1845,7 +1845,7 @@ function outputResults(results: OutputRow[], query: string, opts: OutputOptions)
       }
       return {
         ...(docid && { docid: `#${docid}` }),
-        score: Math.round(row.score * 100) / 100,
+        score: Math.round(row.score * 10000) / 10000,
         file: toQmdPath(row.displayPath),
         title: row.title,
         ...(row.context && { context: row.context }),
@@ -2353,7 +2353,7 @@ async function handlePipeRequest(
       }
       output = results.map(r => ({
         docid: `#${r.docid}`,
-        score: Math.round(r.score * 100) / 100,
+        score: Math.round(r.score * 10000) / 10000,
         file: r.file,
         title: r.title,
         ...(r.context && { context: r.context }),
@@ -2365,7 +2365,7 @@ async function handlePipeRequest(
       const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection);
       output = raw.map(r => ({
         docid: `#${r.docid}`,
-        score: Math.round(r.score * 100) / 100,
+        score: Math.round(r.score * 10000) / 10000,
         file: `qmd://${r.displayPath}`,
         title: r.title,
         ...(r.context && { context: r.context }),
@@ -2394,7 +2394,7 @@ async function handlePipeRequest(
         || req.searches?.[0]?.query || "";
       output = results.map(r => ({
         docid: `#${r.docid}`,
-        score: Math.round(r.score * 100) / 100,
+        score: Math.round(r.score * 10000) / 10000,
         file: r.file,
         title: r.title,
         ...(r.context && { context: r.context }),

@@ -3353,6 +3353,50 @@ if (isMain) {
           process.stderr.write(`[pipe-query] VRAM: ${formatBytes(device.vram.used)} used / ${formatBytes(device.vram.total)} total (${formatBytes(device.vram.free)} free)\n`);
         }
         process.stderr.write(`[pipe-query] models: ${llm.getModelStatus().filter(m => m.loaded).map(m => m.role).join(", ")}\n`);
+
+        // Auto-embed: churn through any pending backlog on startup
+        const pauseFile = resolve(homedir(), ".local/state/qmdctl/embed-paused");
+        if (existsSync(pauseFile)) {
+          process.stderr.write(`[pipe-query] auto-embed skipped (paused)\n`);
+          return;
+        }
+        const lockFile = resolve(homedir(), ".local/state/locks/qmdctl.embed.lock");
+        const lockDir = dirname(lockFile);
+        if (!existsSync(lockDir)) mkdirSync(lockDir, { recursive: true });
+        let totalDocs = 0;
+        let totalChunks = 0;
+        let batch = 0;
+        embedInProgress = true;
+        writeFileSync(lockFile, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+        try {
+          while (true) {
+            if (existsSync(pauseFile)) {
+              process.stderr.write(`[pipe-query] auto-embed paused after ${batch} batches\n`);
+              break;
+            }
+            const result = await generateEmbeddings(store, {
+              maxDocsPerBatch: 50,
+              maxBatchBytes: 10 * 1024 * 1024,
+            });
+            if (result.docsProcessed === 0) break;
+            batch++;
+            totalDocs += result.docsProcessed;
+            totalChunks += result.chunksEmbedded;
+            if (result.errors > 0) {
+              process.stderr.write(`[pipe-query] auto-embed batch ${batch}: ${result.docsProcessed} docs, ${result.chunksEmbedded} chunks, ${result.errors} errors\n`);
+            } else {
+              process.stderr.write(`[pipe-query] auto-embed batch ${batch}: ${result.docsProcessed} docs, ${result.chunksEmbedded} chunks\n`);
+            }
+          }
+        } finally {
+          embedInProgress = false;
+          try { unlinkSync(lockFile); } catch {}
+        }
+        if (totalDocs > 0) {
+          process.stderr.write(`[pipe-query] auto-embed complete: ${totalDocs} docs, ${totalChunks} chunks in ${batch} batches\n`);
+        } else {
+          process.stderr.write(`[pipe-query] auto-embed: no pending docs\n`);
+        }
       }).catch((err: Error) => {
         process.stderr.write(`[pipe-query] model preload failed: ${err.message}\n`);
       });

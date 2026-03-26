@@ -658,6 +658,10 @@ function initializeDatabase(db: Database): void {
   // without SQLite buffer pool copies. Safe with WAL mode.
   db.exec("PRAGMA mmap_size = 2147483648");
 
+  // busy_timeout: wait up to 30s for locks instead of failing immediately.
+  // Prevents SQLITE_BUSY when concurrent processes (pipe-query, update, embed) contend.
+  db.exec("PRAGMA busy_timeout = 30000");
+
   // Drop legacy tables that are now managed in YAML
   db.exec(`DROP TABLE IF EXISTS path_contexts`);
   db.exec(`DROP TABLE IF EXISTS collections`);

@@ -1323,8 +1323,7 @@ export async function generateEmbeddings(
   const db = store.db;
   const model = options?.model ?? DEFAULT_EMBED_MODEL;
   const now = new Date().toISOString();
-  const { maxDocsPerBatch, maxBatchBytes } = resolveEmbedOptions(options);
-  const encoder = new TextEncoder();
+  const embedOptions = resolveEmbedOptions(options);
 
   if (options?.force) {
     clearAllEmbeddings(db);
@@ -1344,6 +1343,8 @@ export async function generateEmbeddings(
 
   // Create a session manager for this llm instance
   const result = await withLLMSessionForLlm(llm, async (session) => {
+    const { maxDocsPerBatch, maxBatchBytes } = embedOptions;
+    const encoder = new TextEncoder();
     let chunksEmbedded = 0;
     let errors = 0;
     let bytesProcessed = 0;
@@ -1449,10 +1450,16 @@ export async function generateEmbeddings(
           totalBytes,
           errors,
         });
+
+        // Yield event loop so pipe-query connection callbacks can fire
+        await new Promise(resolve => setTimeout(resolve, 0));
       }
 
       bytesProcessed += batchBytes;
       options?.onProgress?.({ chunksEmbedded, totalChunks, bytesProcessed, totalBytes, errors });
+
+      // Yield event loop between doc batches
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
 
     return { chunksEmbedded, errors };

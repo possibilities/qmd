@@ -3369,7 +3369,7 @@ if (isMain) {
           const writeLine = (s: string) => { conn.write(s + "\n"); };
 
           // Per-connection ready signal
-          writeLine('{"ready":true}');
+          writeLine(JSON.stringify({ ready: true, embedInProgress }));
 
           connRl.on("line", async (line: string) => {
             await handlePipeRequest(line, store, writeLine);
@@ -3397,7 +3397,7 @@ if (isMain) {
         const rl = createInterface({ input: process.stdin });
         const writeLine = (s: string) => { process.stdout.write(s + "\n"); };
 
-        writeLine('{"ready":true}');
+        writeLine(JSON.stringify({ ready: true, embedInProgress }));
 
         for await (const line of rl) {
           await handlePipeRequest(line, store, writeLine);

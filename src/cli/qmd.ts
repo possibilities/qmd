@@ -110,6 +110,7 @@ enableProductionMode();
 
 let store: ReturnType<typeof createStore> | null = null;
 let storeDbPathOverride: string | undefined;
+let embedInProgress = false;
 
 function getStore(): ReturnType<typeof createStore> {
   if (!store) {
@@ -1686,6 +1687,8 @@ async function vectorIndex(
     console.log(`\n${c.green}✓ Done!${c.reset} Embedded ${c.bold}${result.chunksEmbedded}${c.reset} chunks from ${c.bold}${result.docsProcessed}${c.reset} documents in ${c.bold}${formatETA(totalTimeSec)}${c.reset}`);
     if (result.errors > 0) {
       console.log(`${c.yellow}⚠ ${result.errors} chunks failed${c.reset}`);
+      closeDb();
+      process.exit(1);
     }
   }
 
@@ -2357,6 +2360,11 @@ async function handlePipeRequest(
     const req = JSON.parse(line);
     let output: any[];
 
+    if ((req.command === "query" || req.command === "structured-search") && embedInProgress) {
+      writeLine(JSON.stringify({ error: "embedding in progress, try again later", retry: true }));
+      return;
+    }
+
     if (req.command === "query") {
       const collectionNames: string[] | undefined = req.collections;
       const singleCollection = collectionNames?.length === 1 ? collectionNames[0] : undefined;
@@ -2436,12 +2444,26 @@ async function handlePipeRequest(
         writeLine(JSON.stringify({ docsProcessed: 0, chunksEmbedded: 0, errors: 0, durationMs: 0, paused: true }));
         return;
       }
-      const result = await generateEmbeddings(store, {
-        force: req.force,
-        maxDocsPerBatch: req.maxDocsPerBatch ?? 50,
-        maxBatchBytes: req.maxBatchBytes ?? 10 * 1024 * 1024,
-      });
-      writeLine(JSON.stringify(result));
+      const lockFile = resolve(homedir(), ".local/state/locks/qmdctl.embed.lock");
+      embedInProgress = true;
+      try {
+        const lockDir = dirname(lockFile);
+        if (!existsSync(lockDir)) mkdirSync(lockDir, { recursive: true });
+        writeFileSync(lockFile, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }));
+        const result = await generateEmbeddings(store, {
+          force: req.force,
+          maxDocsPerBatch: req.maxDocsPerBatch ?? 50,
+          maxBatchBytes: req.maxBatchBytes ?? 10 * 1024 * 1024,
+        });
+        if (result.errors > 0) {
+          writeLine(JSON.stringify({ ...result, error: `${result.errors} chunks failed to embed` }));
+        } else {
+          writeLine(JSON.stringify(result));
+        }
+      } finally {
+        embedInProgress = false;
+        try { unlinkSync(lockFile); } catch {}
+      }
       return;
     } else {
       writeLine(JSON.stringify({ error: `Unknown command: ${req.command}` }));

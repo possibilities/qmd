@@ -2395,7 +2395,7 @@ async function handlePipeRequest(
         ...(req.includeContent && r.body ? { body: r.body } : {}),
       }));
     } else if (req.command === "search") {
-      const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection, req.since, req.until);
+      const raw = searchFTS(store.db, req.query, req.limit ?? 20, req.collection, req.since, req.until, req.explain);
       output = raw.map(r => ({
         docid: `#${r.docid}`,
         score: r.score,
@@ -2403,6 +2403,7 @@ async function handlePipeRequest(
         title: r.title,
         ...(r.context && { context: r.context }),
         snippet: extractSnippet(r.body || "", req.query, 300).snippet,
+        ...(req.explain && r.bm25Score !== undefined ? { explain: { bm25Score: r.bm25Score, normalizedScore: r.score, source: "fts" } } : {}),
         ...(req.includeContent && r.body ? { body: r.body } : {}),
       }));
     } else if (req.command === "structured-search") {

@@ -1665,6 +1665,7 @@ export type SearchResult = DocumentResult & {
   score: number;              // Relevance score (0-1)
   source: "fts" | "vec";      // Search source (full-text or vector)
   chunkPos?: number;          // Character position of matching chunk (for vector search)
+  bm25Score?: number;         // Raw FTS5 BM25 score (negative, lower = better match)
 };
 
 /**
@@ -2787,7 +2788,7 @@ export function validateLexQuery(query: string): string | null {
   return null;
 }
 
-export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string | string[], since?: string, until?: string): SearchResult[] {
+export function searchFTS(db: Database, query: string, limit: number = 20, collectionName?: string | string[], since?: string, until?: string, explain?: boolean): SearchResult[] {
   const ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
 
@@ -2850,6 +2851,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
       context: getContextForFile(db, row.filepath),
       score,
       source: "fts" as const,
+      ...(explain ? { bm25Score: row.bm25_score } : {}),
     };
   });
 }

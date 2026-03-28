@@ -2791,18 +2791,26 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   const ftsQuery = buildFTS5Query(query);
   if (!ftsQuery) return [];
 
+  // MATERIALIZED CTE forces SQLite to use the FTS5 index first, then filter
+  // the small result set.  Without MATERIALIZED, SQLite flattens the CTE and
+  // chooses the collection index over FTS5, causing a full scan (~5s → 18ms).
   let sql = `
+    WITH fts_hits AS MATERIALIZED (
+      SELECT rowid, bm25(documents_fts, 10.0, 1.0) as bm25_score
+      FROM documents_fts
+      WHERE documents_fts MATCH ?
+    )
     SELECT
       'qmd://' || d.collection || '/' || d.path as filepath,
       d.collection || '/' || d.path as display_path,
       d.title,
       content.doc as body,
       d.hash,
-      bm25(documents_fts, 10.0, 1.0) as bm25_score
-    FROM documents_fts f
-    JOIN documents d ON d.id = f.rowid
+      fts_hits.bm25_score
+    FROM fts_hits
+    JOIN documents d ON d.id = fts_hits.rowid
     JOIN content ON content.hash = d.hash
-    WHERE documents_fts MATCH ? AND d.active = 1
+    WHERE d.active = 1
   `;
   const params: (string | number)[] = [ftsQuery];
 
@@ -2818,7 +2826,7 @@ export function searchFTS(db: Database, query: string, limit: number = 20, colle
   if (until) { sql += ` AND d.modified_at <= ?`; params.push(until); }
 
   // bm25 lower is better; sort ascending.
-  sql += ` ORDER BY bm25_score ASC LIMIT ?`;
+  sql += ` ORDER BY fts_hits.bm25_score ASC LIMIT ?`;
   params.push(limit);
 
   const rows = db.prepare(sql).all(...params) as { filepath: string; display_path: string; title: string; body: string; hash: string; bm25_score: number }[];
